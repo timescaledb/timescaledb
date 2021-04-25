@@ -23,6 +23,7 @@
 #include <utils/builtins.h>
 #include <utils/jsonb.h>
 #include <utils/lsyscache.h>
+#include <utils/snapmgr.h>
 #include <utils/syscache.h>
 
 #include <catalog.h>
@@ -40,6 +41,8 @@
 #include "remote/dist_commands.h"
 #include "remote/tuplefactory.h"
 #include "chunk_api.h"
+#include "dist_util.h"
+#include "data_node.h"
 
 /*
  * These values come from the pg_type table.
@@ -1626,4 +1629,111 @@ Datum
 chunk_api_get_chunk_relstats(PG_FUNCTION_ARGS)
 {
 	return chunk_api_get_chunk_stats(fcinfo, false);
+}
+
+Datum
+chunk_api_copy_data(PG_FUNCTION_ARGS)
+{
+	Oid chunk_relid = PG_ARGISNULL(0) ? InvalidOid : PG_GETARG_OID(0);
+	const char *src_node_name = PG_ARGISNULL(1) ? NULL : PG_GETARG_CSTRING(1);
+	const char *dst_node_name = PG_ARGISNULL(2) ? NULL : PG_GETARG_CSTRING(2);
+	Chunk *chunk = ts_chunk_get_by_relid(chunk_relid, true);
+	Cache *hcache = ts_hypertable_cache_pin();
+	Hypertable *ht =
+		ts_hypertable_cache_get_entry(hcache, chunk->hypertable_relid, CACHE_FLAG_NONE);
+	List *src_node;
+	List *dst_node;
+	char *src_conn_string;
+	char *operation_id;
+	NameData pub_sub_name; /* publisher/subscriber name will be same */
+
+	TS_PREVENT_FUNC_IF_READ_ONLY();
+
+	PreventInTransactionBlock(true, get_func_name(FC_FN_OID(fcinfo)));
+
+	if (src_node_name == NULL || dst_node_name == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("data node name cannot be NULL")));
+
+	if (dist_util_membership() != DIST_MEMBER_ACCESS_NODE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("function must be run on the access node only")));
+
+	if (!hypertable_is_distributed(ht))
+		ereport(ERROR,
+				(errcode(ERRCODE_TS_HYPERTABLE_NOT_DISTRIBUTED),
+				 errmsg("hypertable \"%s\" is not distributed",
+						get_rel_name(chunk->hypertable_relid))));
+
+	ts_cache_release(hcache);
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("must be superuser to copy chunk to data node"))));
+
+	src_node = list_make1((char *) src_node_name);
+	dst_node = list_make1((char *) dst_node_name);
+
+	/* prepare shared operation id name for publication and subscription */
+	operation_id =
+		psprintf("ts_copy_%s_%s", NameStr(chunk->fd.schema_name), NameStr(chunk->fd.table_name));
+
+	/* pubname has to be upto NAMEDATALEN, so truncation is possible */
+	snprintf(pub_sub_name.data, NAMEDATALEN, "%s", operation_id);
+
+	/* create publication on the source data node, but first close the local txn */
+	CommitTransactionCommand();
+
+	StartTransactionCommand();
+	ts_dist_cmd_run_on_data_nodes(psprintf("CREATE PUBLICATION %s FOR TABLE %s",
+										   pub_sub_name.data,
+										   quote_qualified_identifier(NameStr(
+																		  chunk->fd.schema_name),
+																	  NameStr(
+																		  chunk->fd.table_name))),
+								  src_node);
+	CommitTransactionCommand();
+
+	StartTransactionCommand();
+	/*
+	 * TODO: check if src/dst are not part of the same cluster. No need to create
+	 * repl_slot separately in that case.
+	 *
+	 * CREATE SUBSCRIPTION from a database within the same database cluster will hang.
+	 * So, create the replication slot separately before creating the subscription
+	 */
+	ts_dist_cmd_close_response(ts_dist_cmd_invoke_on_data_nodes(
+								  psprintf("SELECT pg_create_logical_replication_slot('%s', 'pgoutput')",
+										   pub_sub_name.data),
+								  src_node, false));
+
+	/* prepare connection string */
+	src_conn_string = remote_connection_get_connstr(src_node_name);
+
+	/* create subscripton in non-transactional mode on the destination data node */
+	ts_dist_cmd_close_response(ts_dist_cmd_invoke_on_data_nodes(
+										psprintf("CREATE SUBSCRIPTION %s CONNECTION '%s' PUBLICATION %s"
+												 " WITH (create_slot = false)",
+										   pub_sub_name.data,
+										   src_conn_string,
+										   pub_sub_name.data),
+								  dst_node, false));
+
+	/* wait until subscription state set to ready */
+	/* TODO */
+
+	/* stop replication */
+	ts_dist_cmd_close_response(ts_dist_cmd_invoke_on_data_nodes(
+										psprintf("DROP SUBSCRIPTION %s",
+										   pub_sub_name.data),
+								  dst_node, false));
+	ts_dist_cmd_run_on_data_nodes(psprintf("DROP PUBLICATION %s", pub_sub_name.data), src_node);
+	CommitTransactionCommand();
+
+	StartTransactionCommand();
+
+	PG_RETURN_VOID();
 }

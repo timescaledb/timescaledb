@@ -26,3 +26,6 @@ ssl_cert_file='@TEST_OUTPUT_DIR@/ts_data_node.crt'
 ssl_key_file='@TEST_OUTPUT_DIR@/ts_data_node.key'
 timescaledb.ssl_dir='@TEST_OUTPUT_DIR@/timescaledb/certs'
 timescaledb.passfile='@TEST_PASSFILE@'
+
+# Need wal_level set to logical to allow logical replication
+wal_level=logical
