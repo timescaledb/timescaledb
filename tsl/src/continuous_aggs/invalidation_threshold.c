@@ -301,7 +301,7 @@ invalidation_threshold_compute(const ContinuousAgg *cagg, const InternalTimeRang
 		{
 			int64 maxval = ts_time_value_to_internal(maxdat, refresh_window->type);
 			int64 bucket_start =
-				ts_time_bucket_by_type(cagg->data.bucket_width, maxval, refresh_window->type);
+				ts_time_bucket_by_type(cagg->data.bucket_width, maxval, refresh_window->type); // AALEKSEEV XXX
 			/* Add one bucket to get to the end of the last bucket */
 			return ts_time_saturating_add(bucket_start,
 										  cagg->data.bucket_width,

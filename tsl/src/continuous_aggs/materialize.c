@@ -47,7 +47,7 @@ void
 continuous_agg_update_materialization(SchemaAndName partial_view,
 									  SchemaAndName materialization_table, Name time_column_name,
 									  InternalTimeRange new_materialization_range,
-									  InternalTimeRange invalidation_range, int64 bucket_width,
+									  InternalTimeRange invalidation_range, int64 bucket_width, // AALEKSEEV XXX NOT USED!
 									  int32 chunk_id)
 {
 	InternalTimeRange combined_materialization_range = new_materialization_range;

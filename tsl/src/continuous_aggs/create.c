@@ -175,7 +175,7 @@ typedef struct CAggTimebucketInfo
 							/* This should also be the column used by time_bucket */
 	Oid htpartcoltype;
 	int64 htpartcol_interval_len; /* interval length setting for primary partitioning column */
-	int64 bucket_width;			  /*bucket_width of time_bucket */
+	int64 bucket_width;			  /*bucket_width of time_bucket */ // AALEKSEEV XXX
 } CAggTimebucketInfo;
 
 typedef struct AggPartCxt
@@ -222,7 +222,7 @@ static Query *build_union_query(CAggTimebucketInfo *tbinfo, MatTableColumnInfo *
 static void
 create_cagg_catalog_entry(int32 matht_id, int32 rawht_id, const char *user_schema,
 						  const char *user_view, const char *partial_schema,
-						  const char *partial_view, int64 bucket_width, bool materialized_only,
+						  const char *partial_view, int64 bucket_width, bool materialized_only, // AALEKSEEV XXX
 						  const char *direct_schema, const char *direct_view)
 {
 	Catalog *catalog = ts_catalog_get();

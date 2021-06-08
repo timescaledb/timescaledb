@@ -1006,7 +1006,7 @@ watermark_create(const ContinuousAgg *cagg, MemoryContext top_mctx)
 		 * max is the start of the last bucket. Add one bucket to move to the
 		 * point where the materialized data ends. */
 		value = ts_time_value_to_internal(maxdat, timetype);
-		w->value = ts_time_saturating_add(value, cagg->data.bucket_width, timetype);
+		w->value = ts_time_saturating_add(value, cagg->data.bucket_width, timetype); // AALEKSEEV XXX
 	}
 	else
 	{

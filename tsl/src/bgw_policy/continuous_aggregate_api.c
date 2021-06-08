@@ -356,7 +356,7 @@ two_buckets_to_str(const ContinuousAgg *cagg)
 	else
 		bucket_type = cagg->partition_type;
 
-	two_buckets = ts_time_saturating_add(cagg->data.bucket_width,
+	two_buckets = ts_time_saturating_add(cagg->data.bucket_width, // AALEKSEEV XXX
 										 cagg->data.bucket_width,
 										 cagg->partition_type);
 

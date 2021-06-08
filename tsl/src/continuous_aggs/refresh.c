@@ -60,7 +60,7 @@ cagg_get_hypertable_or_fail(int32 hypertable_id)
  * further explanation).
  */
 static InternalTimeRange
-get_largest_bucketed_window(Oid timetype, int64 bucket_width)
+get_largest_bucketed_window(Oid timetype, int64 bucket_width) // AALEKSEEV XXX
 {
 	InternalTimeRange maxwindow = {
 		.type = timetype,
@@ -106,7 +106,7 @@ get_largest_bucketed_window(Oid timetype, int64 bucket_width)
  */
 static InternalTimeRange
 compute_inscribed_bucketed_refresh_window(const InternalTimeRange *const refresh_window,
-										  const int64 bucket_width)
+										  const int64 bucket_width) // AALEKSEEV XXX
 {
 	InternalTimeRange result = *refresh_window;
 	InternalTimeRange largest_bucketed_window =
@@ -171,7 +171,7 @@ compute_inscribed_bucketed_refresh_window(const InternalTimeRange *const refresh
  */
 static InternalTimeRange
 compute_circumscribed_bucketed_refresh_window(const InternalTimeRange *const refresh_window,
-											  const int64 bucket_width)
+											  const int64 bucket_width) // AALEKSEEV XXX
 {
 	InternalTimeRange result = *refresh_window;
 	InternalTimeRange largest_bucketed_window =
@@ -407,7 +407,7 @@ continuous_agg_refresh_with_window(const ContinuousAgg *cagg,
 		};
 
 		InternalTimeRange bucketed_refresh_window =
-			compute_circumscribed_bucketed_refresh_window(&invalidation, cagg->data.bucket_width);
+			compute_circumscribed_bucketed_refresh_window(&invalidation, cagg->data.bucket_width); // AALEKSEEV XXX
 
 		if (do_merged_refresh)
 		{
@@ -591,7 +591,7 @@ continuous_agg_refresh_internal(const ContinuousAgg *cagg,
 	PreventInTransactionBlock(true, REFRESH_FUNCTION_NAME);
 
 	refresh_window =
-		compute_inscribed_bucketed_refresh_window(refresh_window_arg, cagg->data.bucket_width);
+		compute_inscribed_bucketed_refresh_window(refresh_window_arg, cagg->data.bucket_width); // AALEKSEEV XXX
 
 	if (refresh_window.start >= refresh_window.end)
 		ereport(ERROR,

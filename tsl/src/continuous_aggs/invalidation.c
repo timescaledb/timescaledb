@@ -470,7 +470,7 @@ invalidation_entry_reset(Invalidation *entry)
  * invalidations.
  */
 static void
-invalidation_expand_to_bucket_boundaries(Invalidation *inv, Oid timetype, int64 bucket_width)
+invalidation_expand_to_bucket_boundaries(Invalidation *inv, Oid timetype, int64 bucket_width) // AALEKSEEV XXX
 {
 	const int64 min_for_type = ts_time_get_min(timetype);
 	const int64 max_for_type = ts_time_get_max(timetype);
@@ -550,7 +550,7 @@ invalidation_expand_to_bucket_boundaries(Invalidation *inv, Oid timetype, int64 
 
 static void
 invalidation_entry_set_from_hyper_invalidation(Invalidation *entry, const TupleInfo *ti,
-											   int32 hyper_id, Oid dimtype, int64 bucket_width)
+											   int32 hyper_id, Oid dimtype, int64 bucket_width) // AALEKSEEV XXX
 {
 	INVALIDATION_ENTRY_SET(entry,
 						   ti,
@@ -565,7 +565,7 @@ invalidation_entry_set_from_hyper_invalidation(Invalidation *entry, const TupleI
 
 static void
 invalidation_entry_set_from_cagg_invalidation(Invalidation *entry, const TupleInfo *ti, Oid dimtype,
-											  int64 bucket_width)
+											  int64 bucket_width) // AALEKSEEV XXX
 {
 	INVALIDATION_ENTRY_SET(entry,
 						   ti,

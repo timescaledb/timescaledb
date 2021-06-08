@@ -34,7 +34,7 @@
  * DEFAULT_SCHEDULE_INTERVAL
  */
 static Interval *
-continuous_agg_job_get_default_schedule_interval(int32 raw_table_id, int64 bucket_width)
+continuous_agg_job_get_default_schedule_interval(int32 raw_table_id, int64 bucket_width) // AALEKSEEV XXX
 {
 	Dimension *dim;
 	Interval *default_schedule_interval = DEFAULT_SCHEDULE_INTERVAL;
@@ -67,7 +67,7 @@ continuous_agg_job_get_default_schedule_interval(int32 raw_table_id, int64 bucke
 }
 
 int32
-ts_continuous_agg_job_add(int32 mat_table_id, int32 raw_table_id, int64 bucket_width)
+ts_continuous_agg_job_add(int32 mat_table_id, int32 raw_table_id, int64 bucket_width) // AALEKSEEV XXX
 {
 	NameData application_name;
 	NameData proc_name, proc_schema, owner;
