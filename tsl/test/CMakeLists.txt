@@ -67,7 +67,10 @@ if (TAP_CHECKS)
     PATH="${PG_BINDIR}:$ENV{PATH}"
     PGPORT=6${TEST_PGPORT_LOCAL}
     PG_REGRESS=${PG_REGRESS}
-    ${PROVE} -I "${PG_SOURCE_DIR}/src/test/perl"
+    ${PROVE}
+    -I "${PG_SOURCE_DIR}/src/test/perl"
+    -I "${PG_LIBDIR}/pgxs/src/test/perl"
+    -I "${PG_LIBDIR}/postgresql/pgxs/src/test/perl"
     -I "${CMAKE_SOURCE_DIR}/test/perl"
     t/*.pl
     USES_TERMINAL)
