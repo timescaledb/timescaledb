@@ -107,6 +107,26 @@ prev_ProcessUtility(ProcessUtilityArgs *args)
 	}
 }
 
+static ObjectType
+get_altertable_objecttype(AlterTableStmt *stmt)
+{
+#if PG14_GE
+	return stmt->objtype;
+#else
+	return stmt->relkind;
+#endif
+}
+
+static ObjectType
+get_createtableas_objecttype(CreateTableAsStmt *stmt)
+{
+#if PG14_GE
+	return stmt->objtype;
+#else
+	return stmt->relkind;
+#endif
+}
+
 static void
 check_chunk_alter_table_operation_allowed(Oid relid, AlterTableStmt *stmt)
 {
@@ -1469,8 +1489,14 @@ reindex_chunk(Hypertable *ht, Oid chunk_relid, void *arg)
 			stmt->relation->relname = NameStr(chunk->fd.table_name);
 			stmt->relation->schemaname = NameStr(chunk->fd.schema_name);
 			ReindexTable(stmt->relation,
-						 stmt->options,
+						 stmt->options
+#if PG14_LT
+						 ,
 						 stmt->concurrent /* should test for deadlocks */
+#elif PG14_GE
+						 ,
+						 false /* isTopLevel */
+#endif
 			);
 			break;
 		case REINDEX_OBJECT_INDEX:
@@ -1514,7 +1540,11 @@ process_reindex(ProcessUtilityArgs *args)
 			{
 				PreventCommandDuringRecovery("REINDEX");
 				ts_hypertable_permissions_check_by_id(ht->fd.id);
+#if PG14_LT
 				if (stmt->concurrent)
+#else
+				if (stmt->options & REINDEXOPT_CONCURRENTLY)
+#endif
 					ereport(ERROR,
 							(errmsg("concurrent index creation on hypertables is not supported")));
 
@@ -2599,7 +2629,14 @@ process_cluster_start(ProcessUtilityArgs *args)
 			 * Since we keep OIDs between transactions, there is a potential
 			 * issue if an OID gets reassigned between two subtransactions
 			 */
-			cluster_rel(cim->chunkoid, cim->indexoid, stmt->options);
+			cluster_rel(cim->chunkoid,
+						cim->indexoid,
+						stmt->options
+#if PG14_GE
+						,
+						args->context == PROCESS_UTILITY_TOPLEVEL
+#endif
+			);
 			PopActiveSnapshot();
 			CommitTransactionCommand();
 		}
@@ -3153,7 +3190,7 @@ static DDLResult
 process_altertable_start(ProcessUtilityArgs *args)
 {
 	AlterTableStmt *stmt = (AlterTableStmt *) args->parsetree;
-	switch (stmt->relkind)
+	switch (get_altertable_objecttype(stmt))
 	{
 		case OBJECT_TABLE:
 			return process_altertable_start_table(args);
@@ -3428,7 +3465,7 @@ process_altertable_end(Node *parsetree, CollectedCommand *cmd)
 {
 	AlterTableStmt *stmt = (AlterTableStmt *) parsetree;
 
-	switch (stmt->relkind)
+	switch (get_altertable_objecttype(stmt))
 	{
 		case OBJECT_TABLE:
 			process_altertable_end_table(parsetree, cmd);
@@ -3568,7 +3605,7 @@ process_create_table_as(ProcessUtilityArgs *args)
 	bool is_cagg = false;
 	List *pg_options = NIL, *cagg_options = NIL;
 
-	if (stmt->relkind == OBJECT_MATVIEW)
+	if (get_createtableas_objecttype(stmt) == OBJECT_MATVIEW)
 	{
 		/* Check for creation of continuous aggregate */
 		ts_with_clause_filter(stmt->into->options, &cagg_options, &pg_options);
