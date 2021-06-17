@@ -701,6 +701,16 @@ remote_connection_configure(TSConnection *conn)
 		i++;
 	}
 
+	/*
+	 * If we are initiating connection from a standby (of an AN for example),
+	 * then the remote connection session needs to be also set up as a
+	 * READ ONLY one. This will catch any commands that are sent from the
+	 * read only AN to datanodes but which could have potential read-write
+	 * side effects on data nodes.
+	 */
+	if (RecoveryInProgress())
+		appendStringInfo(&sql, "%s", "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;");
+
 	result = PQexec(conn->pg_conn, sql.data);
 	success = PQresultStatus(result) == PGRES_COMMAND_OK;
 	PQclear(result);
