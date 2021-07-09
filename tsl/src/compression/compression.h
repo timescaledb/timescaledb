@@ -161,4 +161,17 @@ extern TupleTableSlot *compress_row_exec(CompressSingleRowState *cr, TupleTableS
 extern void compress_row_end(CompressSingleRowState *cr);
 extern void compress_row_destroy(CompressSingleRowState *cr);
 
+/* RecompressTuple methods */
+typedef struct RecompressTuple RecompressTuple;
+typedef struct RecompressTupleGroupState RecompressTupleGroupState;
+extern RecompressTuple *recompress_tuple_init(int srcht_id, Relation chunk_rel,
+											  Relation compress_rel);
+// extern void recompress_tuple_append_row(RecompressTuple *rcstate, HeapTuple compressed_tuple);
+extern void recompress_tuple_append_row(RecompressTuple *rcstate,
+										RecompressTupleGroupState *grpstate,
+										Datum *compressed_datums, bool *compressed_is_nulls);
+extern HeapTuple recompress_tuple_get_next(RecompressTuple *rcstate,
+										   RecompressTupleGroupState *grpstate, bool *group_done);
+extern RecompressTupleGroupState *recompress_tuple_group_init(RecompressTuple *rcstate);
+extern void recompress_tuple_group_destroy(RecompressTupleGroupState *grpstate);
 #endif

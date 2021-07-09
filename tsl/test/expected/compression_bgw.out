@@ -360,14 +360,14 @@ WHERE hypertable_name = 'test2' ORDER BY chunk_name;
 \set ON_ERROR_STOP 0
 -- call recompress_chunk when status is not unordered
 SELECT recompress_chunk(:'CHUNK_NAME'::regclass, true); 
-psql:include/recompress_basic.sql:95: NOTICE:  nothing to recompress in chunk "_hyper_10_48_chunk" 
+psql:include/recompress_basic.sql:96: NOTICE:  nothing to recompress in chunk "_hyper_10_48_chunk" 
  recompress_chunk 
 ------------------
  
 (1 row)
 
 SELECT recompress_chunk(:'CHUNK_NAME'::regclass, false); 
-psql:include/recompress_basic.sql:96: ERROR:  nothing to recompress in chunk "_hyper_10_48_chunk" 
+psql:include/recompress_basic.sql:97: ERROR:  nothing to recompress in chunk "_hyper_10_48_chunk" 
 --now decompress it , then try and recompress 
 SELECT decompress_chunk(:'CHUNK_NAME'::regclass);
              decompress_chunk             
@@ -376,7 +376,7 @@ SELECT decompress_chunk(:'CHUNK_NAME'::regclass);
 (1 row)
 
 SELECT recompress_chunk(:'CHUNK_NAME'::regclass);
-psql:include/recompress_basic.sql:100: ERROR:  call compress_chunk instead of recompress_chunk
+psql:include/recompress_basic.sql:101: ERROR:  call compress_chunk instead of recompress_chunk
 \set ON_ERROR_STOP 1
 -- test recompress policy
 CREATE TABLE metrics(time timestamptz NOT NULL);
@@ -395,7 +395,7 @@ SELECT add_job('_timescaledb_internal.policy_compression','1w','{"hypertable_id"
 CALL run_job(:JOB_COMPRESS);
 -- 2nd call should do nothing
 CALL run_job(:JOB_COMPRESS);
-psql:include/recompress_basic.sql:117: NOTICE:  no chunks for hypertable public.metrics that satisfy compress chunk policy
+psql:include/recompress_basic.sql:118: NOTICE:  no chunks for hypertable public.metrics that satisfy compress chunk policy
 ---- status should be 1
 SELECT chunk_status FROM compressed_chunk_info_view WHERE hypertable_name = 'metrics';
  chunk_status 
@@ -430,7 +430,7 @@ SELECT alter_job(id,config:=jsonb_set(config,'{recompress}','false')) FROM _time
 
 -- nothing to do
 CALL run_job(:JOB_COMPRESS);
-psql:include/recompress_basic.sql:138: NOTICE:  no chunks for hypertable public.metrics that satisfy compress chunk policy
+psql:include/recompress_basic.sql:139: NOTICE:  no chunks for hypertable public.metrics that satisfy compress chunk policy
 ---- status should be 1
 SELECT chunk_status FROM compressed_chunk_info_view WHERE hypertable_name = 'metrics';
  chunk_status 
@@ -449,7 +449,7 @@ SELECT chunk_status FROM compressed_chunk_info_view WHERE hypertable_name = 'met
 
 -- still nothing to do since we disabled recompress
 CALL run_job(:JOB_COMPRESS);
-psql:include/recompress_basic.sql:150: NOTICE:  no chunks for hypertable public.metrics that satisfy compress chunk policy
+psql:include/recompress_basic.sql:151: NOTICE:  no chunks for hypertable public.metrics that satisfy compress chunk policy
 ---- status should be 3
 SELECT chunk_status FROM compressed_chunk_info_view WHERE hypertable_name = 'metrics';
  chunk_status 
@@ -489,7 +489,7 @@ SELECT chunk_status FROM compressed_chunk_info_view WHERE hypertable_name = 'met
 
 ---- nothing to do yet
 CALL run_job(:JOB_RECOMPRESS);
-psql:include/recompress_basic.sql:172: NOTICE:  no chunks for hypertable "public.metrics" that satisfy recompress chunk policy
+psql:include/recompress_basic.sql:173: NOTICE:  no chunks for hypertable "public.metrics" that satisfy recompress chunk policy
 ---- status should be 1
 SELECT chunk_status FROM compressed_chunk_info_view WHERE hypertable_name = 'metrics';
  chunk_status 
@@ -518,5 +518,277 @@ SELECT delete_job(:JOB_RECOMPRESS);
  delete_job 
 ------------
  
+(1 row)
+
+\i include/recompress_tuples.sql
+-- This file and its contents are licensed under the Timescale License.
+-- Please see the included NOTICE for copyright information and
+-- LICENSE-TIMESCALE for a copy of the license.
+CREATE OR REPLACE VIEW compressed_chunk_info_view AS
+SELECT
+   h.schema_name AS hypertable_schema,
+   h.table_name AS hypertable_name,
+   c.schema_name as chunk_schema,
+   c.table_name as chunk_name,
+   c.status as chunk_status, 
+   comp.schema_name as compressed_chunk_schema,
+   comp.table_name as compressed_chunk_name
+FROM
+   _timescaledb_catalog.hypertable h JOIN
+  _timescaledb_catalog.chunk c ON h.id = c.hypertable_id
+   LEFT JOIN _timescaledb_catalog.chunk comp
+ON comp.id = c.compressed_chunk_id
+;
+-- TEST1 test recompress_tuples has 1 output row per segment --
+CREATE TABLE test3 (timec timestamptz NOT NULL, i integer ,
+      segcol bigint, t text);
+SELECT table_name from create_hypertable('test3', 'timec', chunk_time_interval=> INTERVAL '7 days');
+ table_name 
+------------
+ test3
+(1 row)
+
+-- insert into 2 segments and then compress
+INSERT INTO test3 SELECT q, 10, 11, 'hello' FROM generate_series( '2020-01-03 10:00:00+00', '2020-01-03 12:00:00+00' , '5 min'::interval) q;
+INSERT INTO test3 SELECT q, 10, 15, 'hello' FROM generate_series( '2020-01-03 10:00:00+00', '2020-01-03 12:00:00+00' , '5 min'::interval) q;
+ALTER TABLE test3 set (timescaledb.compress, 
+timescaledb.compress_segmentby = 'segcol', 
+timescaledb.compress_orderby = 'timec DESC');
+SELECT compress_chunk(c)
+FROM show_chunks('test3') c;
+              compress_chunk              
+------------------------------------------
+ _timescaledb_internal._hyper_14_59_chunk
+(1 row)
+
+SELECT compressed_chunk_schema || '.' || compressed_chunk_name as "COMP_CHUNK_NAME",
+        chunk_schema || '.' || chunk_name as "CHUNK_NAME"
+FROM compressed_chunk_info_view 
+WHERE hypertable_name = 'test3' \gset
+--insert into middle of a range of compressed chunk
+INSERT INTO test3 values ( '2020-01-03 10:01:00+00', 20, 11, '2row');
+INSERT INTO test3 values ( '2020-01-03 11:01:00+00', 20, 11, '3row');
+INSERT INTO test3 values ( '2020-01-03 12:01:00+00', 20, 11, '4row');
+--- insert a new segment  by ---
+INSERT INTO test3 values ( '2020-01-03 11:01:00+00', 20, 12, '12row');
+SELECT segcol, _timescaledb_internal.recompress_tuples(:'CHUNK_NAME'::regclass, c ) arr 
+FROM :COMP_CHUNK_NAME c  WHERE segcol = 11 group by segcol;
+ segcol |                                                                                                                                                                                                         arr                                                                                                                                                                                                         
+--------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+     11 | {"(BAAAAj44JDWIAP/////8bHkAAAAAHAAAAAgAAAAA19197gAEfHOp4K4AAAR8c7EHu/8AAAAAHJw3/wAAAAAAAAAAFXUqAAcnDgAAAAAAHJw3/wAAAAAAAAAAFXUqAAcnDgA=,BAAAAAAAAAAACv/////////2AAAAHAAAAAMAAAAAAAAGZgAAAAAAAU7oAAAABSdQAAAAAJ1AAAAAAA==,11,AgBwZ19jYXRhbG9nAHRleHQAAAAAHAAAAAEAAAAAAAAAAgB1VVVZVVVUAAEAAAAEAAAABDRyb3cAAAAFaGVsbG8AAAAEM3JvdwAAAAQycm93,28,10,\"Fri Jan 03 02:00:00 2020 PST\",\"Fri Jan 03 04:01:00 2020 PST\")"}
+(1 row)
+
+\set TABLE_NAME test3 
+\ir recompress_test.sql
+-- This file and its contents are licensed under the Timescale License.
+-- Please see the included NOTICE for copyright information and
+-- LICENSE-TIMESCALE for a copy of the license.
+\set ECHO errors
+ before_recompress_count 
+-------------------------
+                      54
+(1 row)
+
+ before_recompress_chunk_table_count 
+-------------------------------------
+                                   6
+(1 row)
+
+ timec | i | segcol | t 
+-------+---+--------+---
+(0 rows)
+
+ timec | i | segcol | t 
+-------+---+--------+---
+(0 rows)
+
+ after_recompress_count 
+------------------------
+                     54
+(1 row)
+
+ after_compress_chunk_table_count 
+----------------------------------
+                                3
+(1 row)
+
+ segcol | _ts_meta_count | _ts_meta_sequence_num |        _ts_meta_min_1        |        _ts_meta_max_1        
+--------+----------------+-----------------------+------------------------------+------------------------------
+     11 |             28 |                    10 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 04:01:00 2020 PST
+     12 |              1 |                    10 | Fri Jan 03 03:01:00 2020 PST | Fri Jan 03 03:01:00 2020 PST
+     15 |             25 |                    20 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 04:00:00 2020 PST
+(3 rows)
+
+ segcol | min 
+--------+-----
+     11 |  10
+     12 |  10
+     15 |  20
+(3 rows)
+
+ before_recompress_count 
+-------------------------
+                    3655
+(1 row)
+
+ before_recompress_chunk_table_count 
+-------------------------------------
+                                3604
+(1 row)
+
+ timec | i | segcol | t 
+-------+---+--------+---
+(0 rows)
+
+ timec | i | segcol | t 
+-------+---+--------+---
+(0 rows)
+
+ after_recompress_count 
+------------------------
+                   3655
+(1 row)
+
+ after_compress_chunk_table_count 
+----------------------------------
+                                6
+(1 row)
+
+ segcol | _ts_meta_count | _ts_meta_sequence_num |        _ts_meta_min_1        |        _ts_meta_max_1        
+--------+----------------+-----------------------+------------------------------+------------------------------
+     11 |             28 |                    10 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 04:01:00 2020 PST
+     12 |           1000 |                    10 | Fri Jan 03 02:43:22 2020 PST | Fri Jan 03 03:01:00 2020 PST
+     12 |           1000 |                    20 | Fri Jan 03 02:26:42 2020 PST | Fri Jan 03 02:43:21 2020 PST
+     12 |           1000 |                    30 | Fri Jan 03 02:10:02 2020 PST | Fri Jan 03 02:26:41 2020 PST
+     12 |            602 |                    40 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 02:10:01 2020 PST
+     15 |             25 |                    20 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 04:00:00 2020 PST
+(6 rows)
+
+ segcol | min 
+--------+-----
+     11 |  10
+     12 |  10
+     15 |  20
+(3 rows)
+
+ before_recompress_count 
+-------------------------
+                   18178
+(1 row)
+
+ before_recompress_chunk_table_count 
+-------------------------------------
+                               14529
+(1 row)
+
+ timec | i | segcol | t 
+-------+---+--------+---
+(0 rows)
+
+ timec | i | segcol | t 
+-------+---+--------+---
+(0 rows)
+
+ after_recompress_count 
+------------------------
+                  18178
+(1 row)
+
+ after_compress_chunk_table_count 
+----------------------------------
+                               21
+(1 row)
+
+ segcol | _ts_meta_count | _ts_meta_sequence_num |        _ts_meta_min_1        |        _ts_meta_max_1        
+--------+----------------+-----------------------+------------------------------+------------------------------
+     11 |           1000 |                    10 | Fri Jan 03 04:43:21 2020 PST | Fri Jan 03 05:00:00 2020 PST
+     11 |            829 |                    20 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 04:43:20 2020 PST
+     12 |           1000 |                    10 | Fri Jan 03 04:13:21 2020 PST | Fri Jan 03 04:30:00 2020 PST
+     12 |           1000 |                    20 | Fri Jan 03 03:56:41 2020 PST | Fri Jan 03 04:13:20 2020 PST
+     12 |           1000 |                    30 | Fri Jan 03 03:40:01 2020 PST | Fri Jan 03 03:56:40 2020 PST
+     12 |           1000 |                    40 | Fri Jan 03 03:23:21 2020 PST | Fri Jan 03 03:40:00 2020 PST
+     12 |           1000 |                    50 | Fri Jan 03 03:06:41 2020 PST | Fri Jan 03 03:23:20 2020 PST
+     12 |           1000 |                    60 | Fri Jan 03 02:51:03 2020 PST | Fri Jan 03 03:06:40 2020 PST
+     12 |           1000 |                    70 | Fri Jan 03 02:34:23 2020 PST | Fri Jan 03 02:51:02 2020 PST
+     12 |           1000 |                    80 | Fri Jan 03 02:17:43 2020 PST | Fri Jan 03 02:34:22 2020 PST
+     12 |           1000 |                    90 | Fri Jan 03 02:01:03 2020 PST | Fri Jan 03 02:17:42 2020 PST
+     12 |             63 |                   100 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 02:01:02 2020 PST
+     14 |           1000 |                    10 | Fri Jan 03 04:43:21 2020 PST | Fri Jan 03 05:00:00 2020 PST
+     14 |           1000 |                    20 | Fri Jan 03 04:26:41 2020 PST | Fri Jan 03 04:43:20 2020 PST
+     14 |           1000 |                    30 | Fri Jan 03 04:10:01 2020 PST | Fri Jan 03 04:26:40 2020 PST
+     14 |           1000 |                    40 | Fri Jan 03 03:53:21 2020 PST | Fri Jan 03 04:10:00 2020 PST
+     14 |           1000 |                    50 | Fri Jan 03 03:36:41 2020 PST | Fri Jan 03 03:53:20 2020 PST
+     14 |           1000 |                    60 | Fri Jan 03 03:20:01 2020 PST | Fri Jan 03 03:36:40 2020 PST
+     14 |           1000 |                    70 | Fri Jan 03 03:03:21 2020 PST | Fri Jan 03 03:20:00 2020 PST
+     14 |            261 |                    80 | Fri Jan 03 02:59:00 2020 PST | Fri Jan 03 03:03:20 2020 PST
+     15 |             25 |                    20 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 04:00:00 2020 PST
+(21 rows)
+
+  table_name  
+--------------
+ test_multseg
+(1 row)
+
+              compress_chunk              
+------------------------------------------
+ _timescaledb_internal._hyper_16_61_chunk
+(1 row)
+
+ segcol | segcol2 | min 
+--------+---------+-----
+     11 |     100 |  10
+     11 |     200 |  20
+     15 |     900 |  30
+(3 rows)
+
+   compressed_chunk_name    |     chunk_name     | chunk_status 
+----------------------------+--------------------+--------------
+ compress_hyper_17_62_chunk | _hyper_16_61_chunk |            3
+(1 row)
+
+ before_recompress_count 
+-------------------------
+                      79
+(1 row)
+
+ before_recompress_chunk_table_count 
+-------------------------------------
+                                   7
+(1 row)
+
+         recompress_chunk_tuples          
+------------------------------------------
+ _timescaledb_internal._hyper_16_61_chunk
+(1 row)
+
+ timec | segcol2 | segcol | t 
+-------+---------+--------+---
+(0 rows)
+
+ timec | segcol2 | segcol | t 
+-------+---------+--------+---
+(0 rows)
+
+ after_recompress_count 
+------------------------
+                     79
+(1 row)
+
+ after_compress_chunk_table_count 
+----------------------------------
+                                4
+(1 row)
+
+ segcol | segcol2 | _ts_meta_count | _ts_meta_sequence_num |        _ts_meta_min_1        |        _ts_meta_max_1        
+--------+---------+----------------+-----------------------+------------------------------+------------------------------
+     11 |     100 |             26 |                    10 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 04:00:00 2020 PST
+     11 |     200 |             26 |                    10 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 04:00:00 2020 PST
+     12 |      20 |              1 |                    10 | Fri Jan 03 03:01:00 2020 PST | Fri Jan 03 03:01:00 2020 PST
+     15 |     900 |             26 |                    10 | Fri Jan 03 02:00:00 2020 PST | Fri Jan 03 04:01:00 2020 PST
+(4 rows)
+
+   compressed_chunk_name    |     chunk_name     | chunk_status 
+----------------------------+--------------------+--------------
+ compress_hyper_17_62_chunk | _hyper_16_61_chunk |            1
 (1 row)
 

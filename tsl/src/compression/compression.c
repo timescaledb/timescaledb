@@ -138,7 +138,6 @@ typedef struct RowCompressor
 	uint32 rows_compressed_into_current_value;
 	/* a unique monotonically increasing (according to order by) id for each compressed row */
 	int32 sequence_num;
-
 	/* cached arrays used to build the HeapTuple */
 	Datum *compressed_values;
 	bool *compressed_is_null;
@@ -680,6 +679,18 @@ row_compressor_update_group(RowCompressor *row_compressor, TupleTableSlot *row)
 	}
 }
 
+/* use this function if you want the sequence numbering to start at a different offset
+ * instead of the default
+ */
+static inline void
+row_compressor_set_sequence_num(RowCompressor *row_compressor, int32 seqnum)
+{
+	if (seqnum > 0)
+		row_compressor->sequence_num = seqnum;
+	else
+		row_compressor->sequence_num = SEQUENCE_NUM_GAP;
+}
+
 static bool
 row_compressor_new_row_is_in_new_group(RowCompressor *row_compressor, TupleTableSlot *row)
 {
@@ -742,8 +753,9 @@ row_compressor_append_row(RowCompressor *row_compressor, TupleTableSlot *row)
 	row_compressor->rows_compressed_into_current_value += 1;
 }
 
-static void
-row_compressor_flush(RowCompressor *row_compressor, CommandId mycid, bool changed_groups)
+/* fetch compressed tuple from RowCompressor */
+static HeapTuple
+row_compressor_get_compressed_tuple(RowCompressor *row_compressor, MemoryContext tupcontext)
 {
 	int16 col;
 	HeapTuple compressed_tuple;
@@ -818,17 +830,26 @@ row_compressor_flush(RowCompressor *row_compressor, CommandId mycid, bool change
 		elog(ERROR, "sequence id overflow");
 
 	row_compressor->sequence_num += SEQUENCE_NUM_GAP;
-
+	MemoryContext old_ctx = MemoryContextSwitchTo(tupcontext);
 	compressed_tuple = heap_form_tuple(RelationGetDescr(row_compressor->compressed_table),
 									   row_compressor->compressed_values,
 									   row_compressor->compressed_is_null);
-	Assert(row_compressor->bistate != NULL);
-	heap_insert(row_compressor->compressed_table,
-				compressed_tuple,
-				mycid,
-				0 /*=options*/,
-				row_compressor->bistate);
+	/*	Assert(row_compressor->bistate != NULL);
+		CommandId mycid = GetCurrentCommandId(true);
+		heap_insert(row_compressor->compressed_table,
+					compressed_tuple,
+					mycid,
+					0 ,
+					row_compressor->bistate);
+	*/
+	MemoryContextSwitchTo(old_ctx);
+	return compressed_tuple;
+}
 
+static void
+row_compressor_cleanup_after_flush(RowCompressor *row_compressor, bool changed_groups)
+{
+	int16 col;
 	/* free the compressed values now that we're done with them (the old compressor is freed in
 	 * finish()) */
 	for (col = 0; col < row_compressor->n_input_columns; col++)
@@ -873,6 +894,21 @@ row_compressor_flush(RowCompressor *row_compressor, CommandId mycid, bool change
 	row_compressor->num_compressed_rows++;
 	row_compressor->rows_compressed_into_current_value = 0;
 	MemoryContextReset(row_compressor->per_row_ctx);
+}
+
+static void
+row_compressor_flush(RowCompressor *row_compressor, CommandId mycid, bool changed_groups)
+{
+	HeapTuple compressed_tuple =
+		row_compressor_get_compressed_tuple(row_compressor, CurrentMemoryContext);
+
+	Assert(row_compressor->bistate);
+	heap_insert(row_compressor->compressed_table,
+				compressed_tuple,
+				mycid,
+				0 /*=options*/,
+				row_compressor->bistate);
+	row_compressor_cleanup_after_flush(row_compressor, changed_groups);
 }
 
 static void
@@ -1509,8 +1545,9 @@ typedef struct CompressSingleRowState
 
 static TupleTableSlot *compress_singlerow(CompressSingleRowState *cr, TupleTableSlot *in_slot);
 
-CompressSingleRowState *
-compress_row_init(int srcht_id, Relation in_rel, Relation out_rel)
+static void
+row_compressor_init_wrapper(RowCompressor *row_compressor, int srcht_id, Relation in_rel,
+							Relation out_rel, int *n_keys, const ColumnCompressionInfo ***keys)
 {
 	ListCell *lc;
 	List *htcols_list = NIL;
@@ -1519,15 +1556,6 @@ compress_row_init(int srcht_id, Relation in_rel, Relation out_rel)
 	TupleDesc in_desc = RelationGetDescr(in_rel);
 	TupleDesc out_desc = RelationGetDescr(out_rel);
 	int16 *in_column_offsets;
-	int n_keys;
-	const ColumnCompressionInfo **keys;
-
-	CompressSingleRowState *cr = palloc(sizeof(CompressSingleRowState));
-	cr->out_slot =
-		MakeSingleTupleTableSlot(RelationGetDescr(out_rel), table_slot_callbacks(out_rel));
-	cr->in_rel = in_rel;
-	cr->out_rel = out_rel;
-
 	/* get compression properties for hypertable */
 	htcols_list = ts_hypertable_compression_get(srcht_id);
 	cclen = list_length(htcols_list);
@@ -1538,8 +1566,8 @@ compress_row_init(int srcht_id, Relation in_rel, Relation out_rel)
 		ccinfo[i++] = fd;
 	}
 	in_column_offsets =
-		compress_chunk_populate_keys(RelationGetRelid(in_rel), ccinfo, cclen, &n_keys, &keys);
-	row_compressor_init(&cr->row_compressor,
+		compress_chunk_populate_keys(RelationGetRelid(in_rel), ccinfo, cclen, n_keys, keys);
+	row_compressor_init(row_compressor,
 						in_desc,
 						out_rel,
 						cclen,
@@ -1547,6 +1575,20 @@ compress_row_init(int srcht_id, Relation in_rel, Relation out_rel)
 						in_column_offsets,
 						out_desc->natts,
 						false /*need_bistate*/);
+}
+
+CompressSingleRowState *
+compress_row_init(int srcht_id, Relation in_rel, Relation out_rel)
+{
+	int n_keys;
+	const ColumnCompressionInfo **keys;
+	CompressSingleRowState *cr = palloc(sizeof(CompressSingleRowState));
+	cr->out_slot =
+		MakeSingleTupleTableSlot(RelationGetDescr(out_rel), table_slot_callbacks(out_rel));
+	cr->in_rel = in_rel;
+	cr->out_rel = out_rel;
+	row_compressor_init_wrapper(&cr->row_compressor, srcht_id, in_rel, out_rel, &n_keys, &keys);
+
 	return cr;
 }
 
@@ -1658,4 +1700,298 @@ void
 compress_row_destroy(CompressSingleRowState *cr)
 {
 	ExecDropSingleTupleTableSlot(cr->out_slot);
+}
+
+static void
+row_decompressor_init(RowDecompressor *decompressor, Relation chunk_rel, Relation compress_rel)
+{
+	TupleDesc in_desc = RelationGetDescr(compress_rel);
+	TupleDesc out_desc = RelationGetDescr(chunk_rel);
+	Oid out_relid = RelationGetRelid(chunk_rel);
+	Oid compressed_data_type_oid = ts_custom_type_cache_get(CUSTOM_TYPE_COMPRESSED_DATA)->type_oid;
+
+	Assert(OidIsValid(compressed_data_type_oid));
+	decompressor->per_compressed_cols =
+		create_per_compressed_column(in_desc, out_desc, out_relid, compressed_data_type_oid),
+	decompressor->num_compressed_columns = in_desc->natts;
+
+	decompressor->out_desc = out_desc;
+	decompressor->out_rel = chunk_rel; // why is this needed todo???
+
+	decompressor->mycid = GetCurrentCommandId(true), decompressor->bistate = NULL;
+	decompressor->decompressed_datums = NULL;
+	// palloc(sizeof(Datum) * out_desc->natts),
+}
+
+/* RecompressTuple apis
+ * passin a bunch of compressed tuples that need to be recompressed.
+ * recompress_tuple_init - to initialize
+ * recompress_tuple_append_row - add compressed tuples
+ * recompress_tuple_get_next - to fetch recompressed tuples
+ * recompress_tuple_reset - if you want to append a new set of rows
+ *                        - for the same table
+ */
+
+enum RecompressTupleState
+{
+	RecompressTupleNoSort = 0,
+	RecompressTupleInProgress,
+	RecompressTupleDone
+};
+
+typedef struct RecompressTupleGroupState
+{
+	MemoryContext mcontext;
+	/* group specific state */
+	Tuplesortstate *tupsortstate;
+	TupleTableSlot *chunk_rel_tuple_slot;
+	enum RecompressTupleState state;
+	bool changed_groups;
+	int32 row_sequence_num;
+} RecompressTupleGroupState;
+
+typedef struct RecompressTuple
+{
+	TupleDesc compress_tupdesc;
+	TupleDesc chunk_tupdesc;
+	RowDecompressor *decompressor;
+	RowCompressor *compressor;
+	AttrNumber *sort_keys;
+	Oid *sort_operators;
+	Oid *sort_collations;
+	bool *nulls_first;
+	int n_keys;
+	int16 compress_rel_sequence_column_offset;
+} RecompressTuple;
+
+RecompressTuple *
+recompress_tuple_init(int srcht_id, Relation chunk_rel, Relation compress_rel)
+{
+	const ColumnCompressionInfo **keys;
+	Name sequence_num_metadata_name = DatumGetName(
+		DirectFunctionCall1(namein,
+							CStringGetDatum(COMPRESSION_COLUMN_METADATA_SEQUENCE_NUM_NAME)));
+	RecompressTuple *rcstate = palloc(sizeof(RecompressTuple));
+	rcstate->decompressor = palloc(sizeof(RowDecompressor));
+	row_decompressor_init(rcstate->decompressor, chunk_rel, compress_rel);
+	rcstate->compressor = palloc(sizeof(RowCompressor));
+	row_compressor_init_wrapper(rcstate->compressor,
+								srcht_id,
+								chunk_rel,
+								compress_rel,
+								&rcstate->n_keys,
+								&keys);
+	int n_keys = rcstate->n_keys;
+	rcstate->sort_keys = palloc(sizeof(*rcstate->sort_keys) * n_keys);
+	rcstate->sort_operators = palloc(sizeof(*rcstate->sort_operators) * n_keys);
+	rcstate->sort_collations = palloc(sizeof(*rcstate->sort_collations) * n_keys);
+	rcstate->nulls_first = palloc(sizeof(*rcstate->nulls_first) * n_keys);
+
+	rcstate->compress_tupdesc = RelationGetDescr(compress_rel);
+	rcstate->chunk_tupdesc = RelationGetDescr(chunk_rel);
+	rcstate->compress_rel_sequence_column_offset = AttrNumberGetAttrOffset(
+		get_attnum(compress_rel->rd_id, NameStr(*sequence_num_metadata_name)));
+	// rcstate->compressed_datums = palloc(sizeof(Datum) * rcstate->compress_tupdesc->natts);
+	// rcstate->compressed_is_nulls = palloc(sizeof(bool) * rcstate->compress_tupdesc->natts);
+	for (int i = 0; i < n_keys; i++)
+		compress_chunk_populate_sort_info_for_column(RelationGetRelid(chunk_rel),
+													 keys[i],
+													 &rcstate->sort_keys[i],
+													 &rcstate->sort_operators[i],
+													 &rcstate->sort_collations[i],
+													 &rcstate->nulls_first[i]);
+	return rcstate;
+}
+
+RecompressTupleGroupState *
+recompress_tuple_group_init(RecompressTuple *rcstate)
+{
+	RecompressTupleGroupState *grpstate =
+		(RecompressTupleGroupState *) palloc(sizeof(RecompressTupleGroupState));
+	/* we sort the decompressed tuples using tuplesort */
+	grpstate->tupsortstate = tuplesort_begin_heap(rcstate->chunk_tupdesc,
+												  rcstate->n_keys,
+												  rcstate->sort_keys,
+												  rcstate->sort_operators,
+												  rcstate->sort_collations,
+												  rcstate->nulls_first,
+												  work_mem,
+												  NULL,
+												  false /*=randomAccess*/);
+	grpstate->changed_groups = false;
+	grpstate->chunk_rel_tuple_slot =
+		MakeSingleTupleTableSlot(rcstate->chunk_tupdesc, &TTSOpsMinimalTuple);
+	// elog(NOTICE, "in group init  %p %p ************", CurrentMemoryContext, grpstate);
+	grpstate->state = RecompressTupleNoSort;
+	grpstate->row_sequence_num = 0;
+	return grpstate;
+}
+
+void
+recompress_tuple_group_destroy(RecompressTupleGroupState *grpstate)
+{
+	// elog(NOTICE, "in group destroy  %p %p************", CurrentMemoryContext, grpstate);
+	if (grpstate->tupsortstate)
+		tuplesort_end(grpstate->tupsortstate);
+	grpstate->tupsortstate = NULL;
+	ExecDropSingleTupleTableSlot(grpstate->chunk_rel_tuple_slot);
+}
+
+/* Pass in a compressed row.
+ * Decompress the row and add tuples into sort area for recompression.
+ * Keep track of min non zero sequence number for the appended set of rows
+ */
+void
+recompress_tuple_append_row(RecompressTuple *rcstate, RecompressTupleGroupState *grpstate,
+							Datum *compressed_datums, bool *compressed_is_nulls)
+{
+	bool is_done = false;
+	int rwcnt = 0;
+	RowDecompressor *decompressor = rcstate->decompressor;
+	//	Datum *compressed_datums = rcstate->compressed_datums;
+	// bool *compressed_is_nulls = rcstate->compressed_is_nulls;
+
+	/* Step 1: extract decompressed tuple */
+	/*	heap_deform_tuple(compressed_tuple,
+						  rcstate->compress_tupdesc,
+						  rcstate->compressed_datums,
+						  rcstate->compressed_is_nulls); */
+	/* any metadata column is not retrieved. Do that specifically */
+	populate_per_compressed_columns_from_data(decompressor->per_compressed_cols,
+											  rcstate->compress_tupdesc->natts,
+											  compressed_datums,
+											  compressed_is_nulls);
+	int32 seqnum = compressed_datums[rcstate->compress_rel_sequence_column_offset];
+	if (seqnum > 0 && seqnum < grpstate->row_sequence_num)
+		grpstate->row_sequence_num = seqnum;
+	/* decompress the row and add tuples for sorting*/
+	do
+	{
+		is_done = true;
+		Datum *decompressed_datums;
+		bool *decompressed_isnull;
+		ExecClearTuple(grpstate->chunk_rel_tuple_slot);
+		decompressed_datums = grpstate->chunk_rel_tuple_slot->tts_values;
+		decompressed_isnull = grpstate->chunk_rel_tuple_slot->tts_isnull;
+		for (int16 col = 0; col < decompressor->num_compressed_columns; col++)
+		{
+			bool col_is_done = per_compressed_col_get_data(&decompressor->per_compressed_cols[col],
+														   decompressed_datums,
+														   decompressed_isnull);
+			is_done &= col_is_done;
+		}
+		/*
+				HeapTuple decompressed_tuple = heap_form_tuple(row_decompressor->chunk_desc,
+															   row_decompressor->decompressed_datums,
+															   row_decompressor->decompressed_is_nulls);
+			   #if PG12_LT
+					ExecStoreTuple(decompressed_tuple, heap_tuple_slot, InvalidBuffer, false);
+		#else
+					ExecStoreHeapTuple(decompressed_tuple, heap_tuple_slot, false);
+		#endif
+		*/
+		if (!is_done)
+		{
+			ExecStoreVirtualTuple(grpstate->chunk_rel_tuple_slot);
+			/* copied into tuplesort, so we can reuse the slot */
+			tuplesort_puttupleslot(grpstate->tupsortstate, grpstate->chunk_rel_tuple_slot);
+			rwcnt++;
+		}
+	} while (!is_done);
+}
+
+/* Compresses the added tuples (by recompress_tuple_append_row )
+ * and returns 1 or more compressed tuples
+ * Returns the compressed tuple, or NULL when the tuples are exhausted
+ * group_done is set to true when the current group is done
+ * Notes:
+ * RecompressTupleGroupState is not reset by this function. The caller
+ * deals with this as needed based on group_done status information.
+ */
+HeapTuple
+recompress_tuple_get_next(RecompressTuple *rcstate, RecompressTupleGroupState *grpstate,
+						  bool *group_done)
+{
+	MemoryContext old_ctx = NULL, fn_ctx = CurrentMemoryContext;
+	bool flush_tuple = false, got_tuple;
+	HeapTuple compressed_tuple = NULL;
+	RowCompressor *row_compressor = rcstate->compressor;
+	*group_done = false;
+	Assert(grpstate != NULL);
+	/* sort the data */
+	if (grpstate->state == RecompressTupleNoSort)
+	{
+		row_compressor_set_sequence_num(rcstate->compressor, grpstate->row_sequence_num);
+		/* first iteration */
+		tuplesort_performsort(grpstate->tupsortstate);
+	}
+	/* compress the tuples
+	 * The logic is similar to row_compressor_append_sorted_rows
+	 */
+	TupleTableSlot *slot = grpstate->chunk_rel_tuple_slot;
+	ExecClearTuple(slot);
+	for (got_tuple = tuplesort_gettupleslot(grpstate->tupsortstate,
+											true /*=forward*/,
+											false /*=copy*/,
+											slot,
+											NULL /*=abbrev*/);
+		 got_tuple;
+		 got_tuple = tuplesort_gettupleslot(grpstate->tupsortstate,
+											true /*=forward*/,
+											false /*=copy*/,
+											slot,
+											NULL /*=abbrev*/))
+	{
+		bool compressed_row_is_full;
+		slot_getallattrs(slot);
+		old_ctx = MemoryContextSwitchTo(row_compressor->per_row_ctx);
+
+		/* first time through */
+		if (grpstate->state == RecompressTupleNoSort)
+		{
+			row_compressor_update_group(row_compressor, slot);
+			grpstate->state = RecompressTupleInProgress;
+		}
+		grpstate->changed_groups = row_compressor_new_row_is_in_new_group(row_compressor, slot);
+		compressed_row_is_full =
+			row_compressor->rows_compressed_into_current_value >= MAX_ROWS_PER_COMPRESSION;
+		if (compressed_row_is_full || grpstate->changed_groups)
+		{
+			if (row_compressor->rows_compressed_into_current_value > 0)
+			{
+				flush_tuple = true;
+				MemoryContextSwitchTo(old_ctx);
+				break;
+			}
+		}
+		row_compressor_append_row(row_compressor, slot);
+		MemoryContextSwitchTo(old_ctx);
+		ExecClearTuple(slot);
+	}
+	old_ctx = MemoryContextSwitchTo(row_compressor->per_row_ctx);
+	Assert(old_ctx == fn_ctx);
+	if (!flush_tuple && row_compressor->rows_compressed_into_current_value > 0)
+		flush_tuple = true;
+	if (flush_tuple)
+	{
+		compressed_tuple = row_compressor_get_compressed_tuple(row_compressor, fn_ctx);
+		row_compressor_cleanup_after_flush(row_compressor, grpstate->changed_groups);
+		if (got_tuple)
+		{
+			if (grpstate->changed_groups)
+			{
+				*group_done = true;
+				row_compressor_update_group(row_compressor, slot);
+			}
+			row_compressor_append_row(row_compressor, slot);
+		}
+	}
+	if (got_tuple == false)
+	{
+		/* no more tuples */
+		grpstate->state = RecompressTupleDone;
+		*group_done = true;
+	}
+	MemoryContextSwitchTo(old_ctx); // to do is it correct?
+	return compressed_tuple;
 }
