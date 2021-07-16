@@ -46,6 +46,7 @@
 #include <parser/parse_type.h>
 #include <rewrite/rewriteHandler.h>
 #include <rewrite/rewriteManip.h>
+#include <utils/rel.h>
 #include <utils/builtins.h>
 #include <utils/catcache.h>
 #include <utils/int8.h>
@@ -1855,12 +1856,23 @@ cagg_update_view_definition(ContinuousAgg *agg, Hypertable *mat_ht,
 	 */
 	Assert(list_length(view_query->targetList) == list_length(user_query->targetList));
 
+	TupleDesc desc = RelationGetDescr(user_view_rel);
+	int i = 0;
 	forboth (lc1, view_query->targetList, lc2, user_query->targetList)
 	{
 		TargetEntry *view_tle, *user_tle;
+		FormData_pg_attribute *attr = TupleDescAttr(desc, i);
 		view_tle = lfirst_node(TargetEntry, lc1);
 		user_tle = lfirst_node(TargetEntry, lc2);
-		view_tle->resname = user_tle->resname;
+		ereport(LOG,
+				(errmsg("Updating target entry for %s", NameStr(attr->attname)),
+				 errdetail("Attribute %d: desc: %s, view: %s, user: %s",
+						   i,
+						   NameStr(attr->attname),
+						   view_tle->resname,
+						   user_tle->resname)));
+		view_tle->resname = user_tle->resname = NameStr(attr->attname);
+		++i;
 	}
 
 	/* keep locks until end of transaction */
